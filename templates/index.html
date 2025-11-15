@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnimeCast Live - Web Edition</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            color: white;
+        }
+
+        .header {
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .header h1 {
+            font-size: 3em;
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .container {
+            position: relative;
+            max-width: 1280px;
+            width: 90%;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 20px;
+            padding: 20px;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        #videoCanvas {
+            width: 100%;
+            height: auto;
+            border-radius: 15px;
+            display: block;
+        }
+
+        #inputVideo {
+            display: none;
+        }
+
+        .stats {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px 20px;
+            border-radius: 10px;
+            font-size: 1.1em;
+        }
+
+        .stats div {
+            margin: 5px 0;
+        }
+
+        .effect-label {
+            color: #00ffff;
+            font-weight: bold;
+        }
+
+        .fps {
+            color: #00ff00;
+        }
+
+        .status {
+            color: #ffaa00;
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.5);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .info {
+            text-align: center;
+            margin-top: 20px;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>⚡ AnimeCast Live ⚡</h1>
+        <p>Web Edition - Real-Time VFX Engine</p>
+    </div>
+
+    <div class="container">
+        <canvas id="videoCanvas"></canvas>
+        <video id="inputVideo" autoplay playsinline></video>
+
+        <div class="stats">
+            <div class="fps">FPS: <span id="fps">0</span></div>
+            <div class="status">Status: <span id="status">Initializing...</span></div>
+            <div class="effect-label">Effect: <span id="currentEffect">None</span></div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-primary" id="startBtn">Start Camera</button>
+        <button class="btn btn-secondary" id="toggleMode">Switch to Mobile View</button>
+    </div>
+
+    <div class="info">
+        <p>🤚 Single hand with index finger up: Freeza Beam</p>
+        <p>🙌 Two hands in top third: Goku Spirit Bomb</p>
+    </div>
+
+    <script>
+        const socket = io();
+        const videoElement = document.getElementById('inputVideo');
+        const canvasElement = document.getElementById('videoCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const fpsDisplay = document.getElementById('fps');
+        const statusDisplay = document.getElementById('status');
+        const effectDisplay = document.getElementById('currentEffect');
+        const startBtn = document.getElementById('startBtn');
+        const toggleBtn = document.getElementById('toggleMode');
+
+        let hands;
+        let camera;
+        let isProcessing = false;
+        let fps = 0;
+        let lastTime = Date.now();
+        let frameCount = 0;
+
+        // MediaPipe Hands setup
+        hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        function onResults(results) {
+            if (isProcessing) return;
+
+            canvasElement.width = results.image.width;
+            canvasElement.height = results.image.height;
+
+            // Convert landmarks to simple format
+            const handData = [];
+            if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    handData.push(landmarks.map(lm => ({
+                        x: lm.x,
+                        y: lm.y,
+                        z: lm.z
+                    })));
+                }
+            }
+
+            // Draw base image
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            // Send to server for VFX processing (every 2nd frame for performance)
+            if (frameCount % 2 === 0) {
+                sendFrameForProcessing(canvasElement, handData);
+            }
+
+            // Update FPS
+            frameCount++;
+            const now = Date.now();
+            if (now - lastTime >= 1000) {
+                fps = frameCount;
+                fpsDisplay.textContent = fps;
+                frameCount = 0;
+                lastTime = now;
+            }
+        }
+
+        function sendFrameForProcessing(canvas, hands) {
+            isProcessing = true;
+
+            canvas.toBlob((blob) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    socket.emit('process_frame', {
+                        frame: reader.result,
+                        hands: hands,
+                        width: canvas.width,
+                        height: canvas.height
+                    });
+                };
+                reader.readAsDataURL(blob);
+            }, 'image/jpeg', 0.8);
+        }
+
+        // Socket events
+        socket.on('connect', () => {
+            statusDisplay.textContent = 'Connected';
+            statusDisplay.style.color = '#00ff00';
+        });
+
+        socket.on('processed_frame', (data) => {
+            isProcessing = false;
+
+            // Draw processed frame with VFX
+            const img = new Image();
+            img.onload = () => {
+                canvasCtx.drawImage(img, 0, 0, canvasElement.width, canvasElement.height);
+            };
+            img.src = data.frame;
+
+            // Update effect label
+            effectDisplay.textContent = data.effect || 'None';
+        });
+
+        socket.on('error', (data) => {
+            console.error('Server error:', data.message);
+            isProcessing = false;
+        });
+
+        // Start camera
+        startBtn.addEventListener('click', async () => {
+            try {
+                statusDisplay.textContent = 'Starting camera...';
+
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({ image: videoElement });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+
+                await camera.start();
+                statusDisplay.textContent = 'Running';
+                statusDisplay.style.color = '#00ff00';
+                startBtn.textContent = 'Camera Active';
+                startBtn.disabled = true;
+            } catch (err) {
+                console.error('Camera error:', err);
+                statusDisplay.textContent = 'Camera failed';
+                statusDisplay.style.color = '#ff0000';
+            }
+        });
+
+        toggleBtn.addEventListener('click', () => {
+            window.location.href = '/mobile';
+        });
+    </script>
+</body>
+
+</html>

@@ -14,6 +14,11 @@ class VFXEngine:
             return self.cache[path].copy()
         img = Image.open(path).convert("RGBA")
         arr = np.array(img)
+        
+        # Convert RGB to BGR for OpenCV compatibility (keep alpha as-is)
+        # PIL uses RGBA, OpenCV uses BGRA
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        
         self.cache[path] = arr
         return arr.copy()
     

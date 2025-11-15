@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>AnimeCast Live - Mobile</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #000;
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100vh;
+        }
+
+        #videoCanvas {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            display: block;
+        }
+
+        #inputVideo {
+            display: none;
+        }
+
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }
+
+        .stats {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 12px 18px;
+            border-radius: 12px;
+            font-size: 0.9em;
+            color: white;
+            backdrop-filter: blur(10px);
+        }
+
+        .stats div {
+            margin: 4px 0;
+        }
+
+        .fps {
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+
+        .effect {
+            color: #00ffff;
+            font-size: 1.2em;
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+        }
+
+        .controls {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            pointer-events: all;
+        }
+
+        .btn {
+            padding: 15px 25px;
+            font-size: 1em;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+            transition: all 0.3s;
+        }
+
+        .btn-start {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-size: 1.2em;
+            padding: 18px 35px;
+        }
+
+        .btn-start:active {
+            transform: scale(0.95);
+        }
+
+        .btn-flip {
+            background: rgba(255, 255, 255, 0.3);
+            color: white;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5em;
+            backdrop-filter: blur(10px);
+        }
+
+        .info-banner {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            max-width: 80%;
+            display: none;
+        }
+
+        .info-banner.show {
+            display: block;
+        }
+
+        .info-banner h2 {
+            margin-bottom: 20px;
+            font-size: 1.8em;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .info-banner p {
+            margin: 10px 0;
+            font-size: 1.1em;
+        }
+
+        .gesture-guide {
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px 25px;
+            border-radius: 15px;
+            color: white;
+            text-align: center;
+            font-size: 0.9em;
+            backdrop-filter: blur(10px);
+            pointer-events: none;
+        }
+
+        .loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 1.5em;
+            text-align: center;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid white;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="videoCanvas"></canvas>
+    <video id="inputVideo" autoplay playsinline></video>
+
+    <div class="overlay">
+        <div class="stats">
+            <div class="fps">⚡ <span id="fps">0</span> FPS</div>
+            <div class="effect">🔥 <span id="currentEffect">Ready</span></div>
+        </div>
+
+        <div class="gesture-guide" id="guideText">
+            👆 Index up = Freeza | 🙌 Two hands up = Goku
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-start" id="startBtn">▶ Start</button>
+        <button class="btn btn-flip" id="flipBtn">🔄</button>
+    </div>
+
+    <div class="loading" id="loading" style="display: none;">
+        <div class="spinner"></div>
+        <div>Initializing...</div>
+    </div>
+
+    <script>
+        const socket = io();
+        const videoElement = document.getElementById('inputVideo');
+        const canvasElement = document.getElementById('videoCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const fpsDisplay = document.getElementById('fps');
+        const effectDisplay = document.getElementById('currentEffect');
+        const startBtn = document.getElementById('startBtn');
+        const flipBtn = document.getElementById('flipBtn');
+        const loading = document.getElementById('loading');
+        const guideText = document.getElementById('guideText');
+
+        let hands;
+        let camera;
+        let isProcessing = false;
+        let fps = 0;
+        let lastTime = Date.now();
+        let frameCount = 0;
+        let facingMode = 'user'; // 'user' for front, 'environment' for back
+
+        // MediaPipe Hands setup
+        hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 0, // Lower complexity for mobile
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults(onResults);
+
+        function onResults(results) {
+            if (isProcessing) return;
+
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+
+            // Convert landmarks
+            const handData = [];
+            if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    handData.push(landmarks.map(lm => ({
+                        x: lm.x,
+                        y: lm.y,
+                        z: lm.z
+                    })));
+                }
+            }
+
+            // Draw base
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
+
+            // Process every 3rd frame for mobile performance
+            if (frameCount % 3 === 0 && handData.length > 0) {
+                sendFrameForProcessing(canvasElement, handData);
+            }
+
+            // Update FPS
+            frameCount++;
+            const now = Date.now();
+            if (now - lastTime >= 1000) {
+                fps = frameCount;
+                fpsDisplay.textContent = fps;
+                frameCount = 0;
+                lastTime = now;
+            }
+        }
+
+        function sendFrameForProcessing(canvas, hands) {
+            isProcessing = true;
+
+            canvas.toBlob((blob) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    socket.emit('process_frame', {
+                        frame: reader.result,
+                        hands: hands,
+                        width: canvas.width,
+                        height: canvas.height
+                    });
+                };
+                reader.readAsDataURL(blob);
+            }, 'image/jpeg', 0.7); // Lower quality for mobile
+        }
+
+        // Socket events
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+
+        socket.on('processed_frame', (data) => {
+            isProcessing = false;
+
+            const img = new Image();
+            img.onload = () => {
+                canvasCtx.drawImage(img, 0, 0, canvasElement.width, canvasElement.height);
+            };
+            img.src = data.frame;
+
+            effectDisplay.textContent = data.effect || 'Ready';
+
+            // Auto-hide guide when effect is active
+            if (data.effect) {
+                guideText.style.opacity = '0.3';
+            } else {
+                guideText.style.opacity = '1';
+            }
+        });
+
+        socket.on('error', (data) => {
+            console.error('Server error:', data.message);
+            isProcessing = false;
+        });
+
+        // Start camera
+        startBtn.addEventListener('click', async () => {
+            try {
+                loading.style.display = 'block';
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: facingMode,
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                });
+
+                videoElement.srcObject = stream;
+
+                await new Promise((resolve) => {
+                    videoElement.onloadedmetadata = resolve;
+                });
+
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({ image: videoElement });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+
+                await camera.start();
+
+                loading.style.display = 'none';
+                startBtn.textContent = '⏸ Active';
+                startBtn.style.background = 'rgba(255, 255, 255, 0.2)';
+
+            } catch (err) {
+                console.error('Camera error:', err);
+                alert('Camera access denied. Please allow camera permission.');
+                loading.style.display = 'none';
+            }
+        });
+
+        // Flip camera (front/back)
+        flipBtn.addEventListener('click', () => {
+            facingMode = facingMode === 'user' ? 'environment' : 'user';
+            if (camera) {
+                camera.stop();
+                startBtn.click(); // Restart with new facing mode
+            }
+        });
+
+        // Prevent zoom on double tap
+        document.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', (e) => {
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                e.preventDefault();
+            }
+            lastTouchEnd = now;
+        }, false);
+    </script>
+</body>
+
+</html>
