@@ -1,10 +1,12 @@
 # web_app.py
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import cv2
 import numpy as np
 import base64
+import math
+import time
 from src.vfx_engine import VFXEngine
 import json
 
@@ -20,14 +22,19 @@ vfx = VFXEngine()
 print("⚡ Loading VFX assets...")
 freeza_png = vfx.load_png("assets/vfx/freeza/f1.png")
 goku_png = vfx.load_png("assets/vfx/goku/g1.png")
+rasengan_png = vfx.load_png("assets/vfx/naruto/n1.png")
 
 print("⚡ Pre-generating rotations...")
 freeza_rotations = vfx.pregenerate_rotations(freeza_png, steps=72)
 goku_rotations = vfx.pregenerate_rotations(goku_png, steps=72)
+rasengan_rotations = vfx.pregenerate_rotations(rasengan_png, steps=72)
 print("✓ Server ready!")
 
 # Store current rotation angle (server-side animation)
-rotation_state = {'freeza': 0, 'goku': 0}
+rotation_state = {'freeza': 0, 'goku': 0, 'rasengan': 0}
+
+# Store charge state for Spirit Bomb
+charge_state = {'level': 0, 'max_time': 10.0, 'start_time': None}
 
 
 @app.route('/')
@@ -53,99 +60,157 @@ def handle_disconnect():
     print('Client disconnected')
 
 
+def is_open_palm(hand):
+    """Check if hand is in open palm position"""
+    if len(hand) < 21:
+        return False
+    # Check if all fingertips are higher than their MCPs (except thumb)
+    fingers_extended = 0
+    # Index, Middle, Ring, Pinky
+    for tip_idx, mcp_idx in [(8, 5), (12, 9), (16, 13), (20, 17)]:
+        if hand[tip_idx]['y'] < hand[mcp_idx]['y']:
+            fingers_extended += 1
+    return fingers_extended >= 3
+
+def is_only_index_up(hand):
+    """Check if only index finger is up (strict Freeza beam)"""
+    if len(hand) < 21:
+        return False
+    # Index tip above MCP
+    index_up = hand[8]['y'] < hand[5]['y']
+    # Other fingers down
+    middle_down = hand[12]['y'] > hand[9]['y']
+    ring_down = hand[16]['y'] > hand[13]['y']
+    pinky_down = hand[20]['y'] > hand[17]['y']
+    return index_up and middle_down and ring_down and pinky_down
+
 @socketio.on('process_frame')
 def handle_frame(data):
     """
-    Receive frame + hand landmarks from client, apply VFX, return processed frame
-    data format: {
-        'frame': base64_encoded_image,
-        'hands': [landmark_data],
-        'width': int,
-        'height': int
-    }
+    Receive hand landmarks from client, return VFX data
+    OPTIMIZED: Only processes gesture logic, client renders VFX
     """
     try:
-        # Decode frame
-        frame_data = base64.b64decode(data['frame'].split(',')[1])
-        nparr = np.frombuffer(frame_data, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
         hands = data.get('hands', [])
         w, h = data['width'], data['height']
         
-        active_vfx = None
-        vfx_center = None
-        vfx_scale = 1.0
-        effect_name = None
+        # Reset charge if no hands
+        if len(hands) == 0:
+            charge_state['start_time'] = None
+            charge_state['level'] = 0
+            emit('processed_frame', {'vfx_data': None, 'effect': None})
+            return
         
-        # ========= FREEZA (Single hand, index up) =========
+        # ========= RASENGAN (Single hand open palm) =========
         if len(hands) == 1:
             hand = hands[0]
-            # Get fingertip from landmarks (index 8)
-            if len(hand) > 8:
-                tip = hand[8]
-                cx = int(tip['x'] * w)
-                cy = int(tip['y'] * h)
-                
-                # Animate rotation
-                rotation_state['freeza'] = (rotation_state['freeza'] + 5) % 360
-                rotated = vfx.get_prerotated(freeza_rotations, rotation_state['freeza'])
-                
-                vfx_scale = 0.5
-                vfx_center = (cx, cy)
-                active_vfx = rotated
-                effect_name = "Freeza Beam"
+            
+            # Check for open palm first (higher priority)
+            if is_open_palm(hand):
+                # Get palm center (wrist + middle_mcp) / 2
+                if len(hand) > 9:
+                    wrist = hand[0]
+                    mid_mcp = hand[9]
+                    cx = int(((wrist['x'] + mid_mcp['x']) / 2) * w)
+                    cy = int(((wrist['y'] + mid_mcp['y']) / 2) * h)
+                    
+                    # Animate rotation (fast spin)
+                    rotation_state['rasengan'] = (rotation_state['rasengan'] + 15) % 360
+                    
+                    emit('processed_frame', {
+                        'vfx_data': {
+                            'type': 'rasengan',
+                            'angle': rotation_state['rasengan'],
+                            'position': {'x': cx, 'y': cy},
+                            'scale': 0.25
+                        },
+                        'effect': 'Rasengan'
+                    })
+                    return
+            
+            # ========= FREEZA (Only index finger up) =========
+            elif is_only_index_up(hand):
+                if len(hand) > 8:
+                    tip = hand[8]
+                    cx = int(tip['x'] * w)
+                    cy = int(tip['y'] * h)
+                    
+                    # Animate rotation
+                    rotation_state['freeza'] = (rotation_state['freeza'] + 8) % 360
+                    
+                    emit('processed_frame', {
+                        'vfx_data': {
+                            'type': 'freeza',
+                            'angle': rotation_state['freeza'],
+                            'position': {'x': cx, 'y': cy},
+                            'scale': 0.3
+                        },
+                        'effect': 'Freeza Beam'
+                    })
+                    return
         
-        # ========= GOKU (Two hands top row) =========
+        # ========= GOKU SPIRIT BOMB (Two hands top row with charge) =========
         elif len(hands) == 2:
             hand0 = hands[0]
             hand1 = hands[1]
             
             if len(hand0) > 9 and len(hand1) > 9:
-                # Get palm centers (average of wrist [0] and middle_mcp [9])
+                # Get palm centers
                 wrist0 = hand0[0]
                 mid0 = hand0[9]
-                p0x = int(((wrist0['x'] + mid0['x']) / 2) * w)
-                p0y = int(((wrist0['y'] + mid0['y']) / 2) * h)
+                p0x = ((wrist0['x'] + mid0['x']) / 2)
+                p0y = ((wrist0['y'] + mid0['y']) / 2)
                 
                 wrist1 = hand1[0]
                 mid1 = hand1[9]
-                p1x = int(((wrist1['x'] + mid1['x']) / 2) * w)
-                p1y = int(((wrist1['y'] + mid1['y']) / 2) * h)
+                p1x = ((wrist1['x'] + mid1['x']) / 2)
+                p1y = ((wrist1['y'] + mid1['y']) / 2)
                 
-                # Check if both in top third (row 0)
-                row_h = h // 3
-                if p0y < row_h and p1y < row_h:
-                    cx = (p0x + p1x) // 2
-                    cy = (p0y + p1y) // 2
+                # Check if both in top third
+                if p0y < 0.33 and p1y < 0.33:
+                    # Initialize charge timer
+                    if charge_state['start_time'] is None:
+                        charge_state['start_time'] = time.time()
                     
-                    dist = np.sqrt((p0x - p1x)**2 + (p0y - p1y)**2)
-                    vfx_scale = max(0.7, dist / (goku_png.shape[1] + 1))
+                    # Calculate charge level
+                    elapsed = time.time() - charge_state['start_time']
+                    charge_level = min(1.0, elapsed / charge_state['max_time'])
+                    charge_state['level'] = charge_level
+                    
+                    cx = int(((p0x + p1x) / 2) * w)
+                    cy = int(((p0y + p1y) / 2) * h)
+                    
+                    # Scale grows from 0.2 to 1.2 based on charge
+                    vfx_scale = 0.2 + (charge_level * 1.0)
                     
                     # Animate rotation
-                    rotation_state['goku'] = (rotation_state['goku'] + 8) % 360
-                    rotated = vfx.get_prerotated(goku_rotations, rotation_state['goku'])
+                    rotation_state['goku'] = (rotation_state['goku'] + 12) % 360
                     
-                    active_vfx = rotated
-                    vfx_center = (cx, cy)
-                    effect_name = "Goku Spirit Bomb"
+                    emit('processed_frame', {
+                        'vfx_data': {
+                            'type': 'goku',
+                            'angle': rotation_state['goku'],
+                            'position': {'x': cx, 'y': cy},
+                            'scale': vfx_scale,
+                            'charge_level': charge_level
+                        },
+                        'effect': 'Spirit Bomb'
+                    })
+                    return
+                else:
+                    # Reset charge if not in top row
+                    charge_state['start_time'] = None
+                    charge_state['level'] = 0
         
-        # Apply VFX overlay
-        if active_vfx is not None:
-            frame = vfx.overlay_png(frame, active_vfx, vfx_center, scale=vfx_scale)
-        
-        # Encode back to base64
-        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        frame_b64 = base64.b64encode(buffer).decode('utf-8')
-        
-        # Send back processed frame
-        emit('processed_frame', {
-            'frame': f'data:image/jpeg;base64,{frame_b64}',
-            'effect': effect_name
-        })
+        # No effect detected - reset charge
+        charge_state['start_time'] = None
+        charge_state['level'] = 0
+        emit('processed_frame', {'vfx_data': None, 'effect': None})
         
     except Exception as e:
         print(f"Error processing frame: {e}")
+        import traceback
+        traceback.print_exc()
         emit('error', {'message': str(e)})
 
 

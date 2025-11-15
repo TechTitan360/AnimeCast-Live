@@ -158,8 +158,9 @@
     </div>
 
     <div class="info">
-        <p>🤚 Single hand with index finger up: Freeza Beam</p>
-        <p>🙌 Two hands in top third: Goku Spirit Bomb</p>
+        <p>👆 Index finger only: Freeza Beam</p>
+        <p>✋ Open palm: Rasengan</p>
+        <p>🙌 Two hands up: Spirit Bomb (charges over 10s)</p>
     </div>
 
     <script>
@@ -180,6 +181,27 @@
         let lastTime = Date.now();
         let frameCount = 0;
 
+        // Store current VFX state to prevent flickering
+        let currentVFX = null;
+        let vfxImages = {}; // Cache loaded images
+
+        // Preload VFX images
+        function preloadVFXImages() {
+            const images = {
+                'freeza': '/static/freeza/f1.png',
+                'goku': '/static/goku/g1.png',
+                'rasengan': '/static/naruto/n1.png'
+            };
+
+            for (const [key, src] of Object.entries(images)) {
+                const img = new Image();
+                img.src = src;
+                vfxImages[key] = img;
+            }
+        }
+
+        preloadVFXImages();
+
         // MediaPipe Hands setup
         hands = new Hands({
             locateFile: (file) => {
@@ -197,8 +219,6 @@
         hands.onResults(onResults);
 
         function onResults(results) {
-            if (isProcessing) return;
-
             canvasElement.width = results.image.width;
             canvasElement.height = results.image.height;
 
@@ -217,10 +237,13 @@
             // Draw base image
             canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
 
-            // Send to server for VFX processing (every 2nd frame for performance)
-            if (frameCount % 2 === 0) {
-                sendFrameForProcessing(canvasElement, handData);
+            // Draw current VFX if exists (persistent rendering)
+            if (currentVFX) {
+                drawVFX(currentVFX);
             }
+
+            // Send hand data to server for gesture detection
+            sendFrameForProcessing(canvasElement, handData);
 
             // Update FPS
             frameCount++;
@@ -234,20 +257,39 @@
         }
 
         function sendFrameForProcessing(canvas, hands) {
-            isProcessing = true;
+            // Only send hand landmarks, not the image
+            socket.emit('process_frame', {
+                hands: hands,
+                width: canvas.width,
+                height: canvas.height
+            });
+        }
 
-            canvas.toBlob((blob) => {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    socket.emit('process_frame', {
-                        frame: reader.result,
-                        hands: hands,
-                        width: canvas.width,
-                        height: canvas.height
-                    });
-                };
-                reader.readAsDataURL(blob);
-            }, 'image/jpeg', 0.8);
+        function drawVFX(vfx) {
+            const img = vfxImages[vfx.type];
+            if (!img || !img.complete) return;
+
+            canvasCtx.save();
+
+            // Translate to center, rotate, draw
+            canvasCtx.translate(vfx.position.x, vfx.position.y);
+            canvasCtx.rotate(vfx.angle * Math.PI / 180);
+
+            const drawW = img.width * vfx.scale;
+            const drawH = img.height * vfx.scale;
+            canvasCtx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+
+            canvasCtx.restore();
+
+            // Draw charge indicator if Spirit Bomb
+            if (vfx.type === 'goku' && vfx.charge_level !== undefined) {
+                const chargePercent = Math.round(vfx.charge_level * 100);
+                canvasCtx.save();
+                canvasCtx.fillStyle = 'rgba(255, 255, 0, 0.8)';
+                canvasCtx.font = 'bold 20px Arial';
+                canvasCtx.fillText(`CHARGE: ${chargePercent}%`, vfx.position.x - 50, vfx.position.y - 100);
+                canvasCtx.restore();
+            }
         }
 
         // Socket events
@@ -257,22 +299,21 @@
         });
 
         socket.on('processed_frame', (data) => {
-            isProcessing = false;
+            if (!data.vfx_data) {
+                effectDisplay.textContent = 'None';
+                currentVFX = null; // Clear VFX when no effect
+                return;
+            }
 
-            // Draw processed frame with VFX
-            const img = new Image();
-            img.onload = () => {
-                canvasCtx.drawImage(img, 0, 0, canvasElement.width, canvasElement.height);
-            };
-            img.src = data.frame;
+            // Update current VFX state (will be rendered on next frame)
+            currentVFX = data.vfx_data;
 
             // Update effect label
-            effectDisplay.textContent = data.effect || 'None';
+            effectDisplay.textContent = data.effect || 'Active';
         });
 
         socket.on('error', (data) => {
             console.error('Server error:', data.message);
-            isProcessing = false;
         });
 
         // Start camera
